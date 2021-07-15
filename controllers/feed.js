@@ -4,16 +4,17 @@ const { validationResult } = require('express-validator');
 const Post = require('../models/post');
 const User = require('../models/user');
 const { errorHandler, serverError } = require('../error/errorHandling');
+const io = require('../socket');
 
 // Get multiple posts
 exports.getPosts = async (req, res, next) => {
   const currentPage = req.query.page || 1;
   const perPage = 2;
-  let totalItems;
   try {
     const totalItems = await Post.find().countDocuments();
     const posts = await Post.find()
       .populate('creator')
+      .sort({ createdAt: -1 })
       .skip((currentPage - 1) * perPage)
       .limit(perPage);
 
@@ -36,7 +37,6 @@ exports.createPost = async (req, res, next) => {
 
   const imageUrl = req.file.path;
   const { title, content } = req.body;
-  let creator;
 
   const post = new Post({
     title: title,
@@ -49,6 +49,10 @@ exports.createPost = async (req, res, next) => {
     const user = await User.findById(req.userId);
     user.posts.push(post);
     await user.save();
+    io.getIO().emit('posts', {
+      action: 'create',
+      post: { ...post._doc, creator: { _id: req.userId, name: user.name } },
+    });
     // Create post in db
     // 201 -> Success a resource was created
     res.status(201).json({
@@ -92,9 +96,9 @@ exports.updatePost = async (req, res, next) => {
   }
   errorHandler(imageUrl, 'No file picked', 422);
   try {
-    const post = await Post.findById(postId);
+    const post = await Post.findById(postId).populate('creator');
     errorHandler(post, 'Could not find post', 404);
-    if (post.creator.toString() !== req.userId) {
+    if (post.creator._id.toString() !== req.userId) {
       const error = new Error('Not authorized!');
       error.statusCode = 403;
       throw error;
@@ -106,6 +110,7 @@ exports.updatePost = async (req, res, next) => {
     post.imageUrl = imageUrl;
     post.content = content;
     const result = await post.save();
+    io.getIO().emit('posts', { action: 'update', post: result });
     res.status(200).json({ message: 'Post updated!', post: result });
   } catch (err) {
     serverError(err);
@@ -131,6 +136,7 @@ exports.deletePost = async (req, res, next) => {
     const user = await User.findById(req.userId);
     user.posts.pull(postId);
     await user.save();
+    io.getIO().emit('posts', { action: 'delete', post: postId });
     res.status(200).json({ message: 'Deleted post' });
   } catch (err) {
     serverError(err);
@@ -142,6 +148,9 @@ exports.deletePost = async (req, res, next) => {
 // ================================ //
 const clearImage = async filePath => {
   filep = path.join(__dirname, '..', filePath);
-  const err = await fs.unlink(filep);
-  console.log(err);
+  try {
+    await fs.unlink(filep);
+  } catch (err) {
+    console.log(err);
+  }
 };
